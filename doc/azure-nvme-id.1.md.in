@@ -1,0 +1,19 @@
+---
+title: azure-nvme-id
+section: 1
+header: User Manual
+footer: azure-nvme-id @VERSION@
+date: April 12, 2024
+---
+
+# NAME
+azure-nvme-id - Identify Azure NVMe devices.
+
+# SYNOPSIS
+**azure-nvme-id** [*OPTION*]...
+
+# DESCRIPTION
+**azure-nvme-id** is a utility to simplify identification of Azure NVMe devices.
+
+# SEE ALSO
+Source and documentation available at: <https://github.com/Azure/azure-nvme-utils>
