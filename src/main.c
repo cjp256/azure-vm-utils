@@ -129,8 +129,8 @@ char *read_file_as_string(const char *path)
     size_t bytes_read = fread(contents, 1, length, file);
     if ((long)bytes_read < length)
     {
-        // Short read, maybe contents changed. Continue regardless.
-        fprintf(stderr, "short read on %s, contents probably changed", path);
+        // Entries in sysfs entries may report system memory page size, e.g. 4096.
+        DEBUG_PRINTF("short read on %s: read %zd bytes, expected %ld\n", path, bytes_read, length);
     }
 
     fclose(file);
