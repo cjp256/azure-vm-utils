@@ -1,20 +1,25 @@
+%global commit cbf8c65d0d792b7dfc02dcaa55d5ec3077464ee6
+%global shortcommit %(c=%{commit}; echo ${c:0:7})
+
 Name:           azure-nvme-utils
-Version:        %{__git_version}
-Release:        %{__git_release}%{?dist}
+Version:        0.1.3
+Release:        %autorelease
 Summary:        Utility and udev rules to help identify Azure NVMe devices
 
 License:        MIT
 URL:            https://github.com/Azure/%{name}
-Source0:        %{name}_dev.tgz
+Source:         %{url}/archive/%{commit}/%{name}-%{shortcommit}.tar.gz
 
 BuildRequires:  cmake
 BuildRequires:  gcc
+BuildRequires:  pandoc
+BuildRequires:  pkgconfig(libudev)
 
 %description
 Utility and udev rules to help identify Azure NVMe devices.
 
 %prep
-%autosetup
+%autosetup -n azure-nvme-utils-%{commit}
 
 %build
 %cmake -DVERSION="%{version}-%{release}"
@@ -27,8 +32,9 @@ Utility and udev rules to help identify Azure NVMe devices.
 %ctest
 
 %files
-%{_exec_prefix}/lib/udev/rules.d/80-azure-nvme.rules
+%{_mandir}/man1/azure-nvme-id.1.gz
 %{_sbindir}/azure-nvme-id
+%{_udevrulesdir}/80-azure-nvme.rules
 
 %changelog
 %autochangelog
