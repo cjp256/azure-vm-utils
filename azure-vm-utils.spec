@@ -1,6 +1,6 @@
 Name:           azure-vm-utils
 Version:        0.3.0
-Release:        %autorelease
+Release:        1
 Summary:        Core utilities and configuration for Linux VMs on Azure
 
 License:        MIT
@@ -37,4 +37,6 @@ configuration to support Linux VMs on Azure.
 %{_udevrulesdir}/80-azure-disk.rules
 
 %changelog
-%autochangelog
+%changelog
+* Thu Sep 12 2024 Chris Patterson <cpatterson@microsoft.com> - 0.3.0-1
+- Initial version.
