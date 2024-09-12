@@ -12,8 +12,8 @@ BuildRequires:  gcc
 BuildRequires:  pandoc
 BuildRequires:  pkgconfig(libudev)
 
+Provides:       azure-nvme-utils = %{version}-%{release}
 Obsoletes:      azure-nvme-utils < 0.1.3-3
-Provides:       azure-nvme-utils
 
 %description
 This package provides a home for core utilities, udev rules and other
