@@ -9,7 +9,6 @@ Source:         %{url}/archive/v%{version}/%{name}-v%{version}.tar.gz
 
 BuildRequires:  cmake
 BuildRequires:  gcc
-BuildRequires:  pandoc
 BuildRequires:  pkgconfig(libudev)
 
 Provides:       azure-nvme-utils = %{version}-%{release}
