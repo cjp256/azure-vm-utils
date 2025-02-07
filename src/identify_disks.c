@@ -16,6 +16,14 @@
 #include "nvme.h"
 
 /**
+ * Sort directories alphanumerically.
+ */
+int alnum_sort(const struct dirent **a, const struct dirent **b)
+{
+    return strverscmp((*a)->d_name, (*b)->d_name);
+}
+
+/**
  * Trim trailing whitespace from a string in-place.
  */
 void trim_trailing_whitespace(char *str)
@@ -103,7 +111,7 @@ int enumerate_namespaces_for_controller(struct nvme_controller *ctrl)
 {
     struct dirent **namelist;
 
-    int n = scandir(ctrl->sys_path, &namelist, is_nvme_namespace, alphasort);
+    int n = scandir(ctrl->sys_path, &namelist, is_nvme_namespace, alnum_sort);
     if (n < 0)
     {
         fprintf(stderr, "failed scandir for %s: %m\n", ctrl->sys_path);
@@ -185,7 +193,7 @@ int identify_disks(void)
 {
     struct dirent **namelist;
 
-    int n = scandir(SYS_CLASS_NVME_PATH, &namelist, is_azure_nvme_controller, alphasort);
+    int n = scandir(SYS_CLASS_NVME_PATH, &namelist, is_azure_nvme_controller, alnum_sort);
     if (n < 0)
     {
         fprintf(stderr, "no NVMe devices in %s: %m\n", SYS_CLASS_NVME_PATH);
