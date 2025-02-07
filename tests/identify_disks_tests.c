@@ -277,6 +277,19 @@ static void _setup_nvme9_direct_disk_v2(void)
                 strdup("key1=nvme9n1value1,key2=nvme9n1value2"));
 }
 
+/**
+ * Setup nvme10: direct disk v2 which is missing vs support (unexpected case).
+ */
+static void _setup_nvme10_direct_disk_v2_missing_vs(void)
+{
+    create_file(fake_sys_class_nvme_path, "nvme10/device/vendor", "0x1414");
+    create_file(fake_sys_class_nvme_path, "nvme10/model", MICROSOFT_NVME_DIRECT_DISK_V2);
+    create_dir(fake_sys_class_nvme_path, "nvme10/nvme10n1");
+
+    expect_string(__wrap_nvme_identify_namespace_vs_for_namespace_device, namespace_path, "/dev/nvme10n1");
+    will_return(__wrap_nvme_identify_namespace_vs_for_namespace_device, strdup(""));
+}
+
 static void test_trim_trailing_whitespace(void **state)
 {
     (void)state; // Unused parameter
@@ -344,7 +357,8 @@ static void test_identify_disks(void **state)
          "/dev/nvme7n4: type=data,lun=2\n"
          "/dev/nvme7n9: type=data,lun=7\n"},
         {"nvme8", _setup_nvme8_direct_disk_v1_without_vs, "", "/dev/nvme8n1: type=local\n"},
-        {"nvme9", _setup_nvme9_direct_disk_v2, "", "/dev/nvme9n1: key1=nvme9n1value1,key2=nvme9n1value2\n"}};
+        {"nvme9", _setup_nvme9_direct_disk_v2, "", "/dev/nvme9n1: key1=nvme9n1value1,key2=nvme9n1value2\n"},
+        {"nvme10", _setup_nvme10_direct_disk_v2_missing_vs, "", "/dev/nvme10n1: \n"}};
 
     for (size_t i = 0; i < sizeof(test_cases) / sizeof(test_cases[0]); i++)
     {
@@ -368,6 +382,7 @@ static void test_identify_disks_combined(void **state)
 
     _setup_nvme0_microsoft_no_name_namespaces();
     _setup_nvme1_microsoft_one_namespace();
+    _setup_nvme10_direct_disk_v2_missing_vs();
     _setup_nvme2_microsoft_two_namespaces();
     _setup_nvme4_non_microsoft();
     _setup_nvme5_microsoft_mixed_namespaces();
@@ -381,6 +396,7 @@ static void test_identify_disks_combined(void **state)
     assert_int_equal(result, 0);
     assert_string_equal(capture_stderr(), "");
     assert_string_equal(capture_stdout(), "/dev/nvme1n1: key1=nvme1n1value1,key2=nvme1n1value2\n"
+                                          "/dev/nvme10n1: \n"
                                           "/dev/nvme2n1: key1=nvme2n1value1,key2=nvme2n1value2\n"
                                           "/dev/nvme2n2: key1=nvme2n2value1,key2=nvme2n2value2\n"
                                           "/dev/nvme5n1: key1=nvme5n1value1,key2=nvme5n1value2\n"
