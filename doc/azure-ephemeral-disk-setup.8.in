@@ -1,4 +1,4 @@
-.TH "azure-ephemeral-disk-setup" "8" "August\ 08,\ 2025" "azure-ephemeral-disk-setup @VERSION@" "User Manual"
+.TH "azure-ephemeral-disk-setup" "8" "September\ 08,\ 2025" "azure-ephemeral-disk-setup @VERSION@" "User Manual"
 .hy
 .SH NAME
 .PP
@@ -177,7 +177,7 @@ Formats target device (either RAID device or single disk) directly
 Uses \f[CB]mkfs.ext4 [-F] -L AzureEphmDsk ...\f[R] or
 \f[CB]mkfs.xfs [-f] -L AzureEphmDsk ...\f[R] with the force flag only if
 it is reformatting the SCSI resource disk
-.SS 7. Persistenting Mount
+.SS 7. Persisting Mount
 .PP
 If \f[CB]/etc/fstab\f[R] is writable:
 .IP \[bu] 2
@@ -205,7 +205,7 @@ Tries to mount using systemd (\f[CB]systemctl start <mount.unit>\f[R])
 .IP \[bu] 2
 Falls back to direct \f[CB]mount\f[R] call if mount unit fails to start
 .PP
-For non-persitent mounts, a \f[CB]mount\f[R] call is used.
+For non-persistent mounts, a \f[CB]mount\f[R] call is used.
 .SH SAFETY AND VALIDATION
 .PP
 This service only formats NVMe disks that are:
@@ -253,13 +253,16 @@ filesystem type, determined by configuration (e.g., \f[CB]ext4\f[R] or
 \f[CB]xfs\f[R]).
 .IP \[bu] 2
 \f[B]fs_mntops\f[R]:
-\f[CB]defaults,nofail,comment=azure-ephemeral-disk-setup\f[R]
+\f[CB]defaults,nofail,[discard,]comment=azure-ephemeral-disk-setup\f[R]
 .RS 2
 .IP \[bu] 2
 \f[CB]defaults\f[R]: standard mount options
 .IP \[bu] 2
 \f[CB]nofail\f[R]: ensures the VM boots even if the ephemeral disk is
 missing or has been re-allocated
+.IP \[bu] 2
+\f[CB]discard\f[R]: if local NVMe disks are detected, discard is enabled
+for fstrim support
 .IP \[bu] 2
 \f[CB]comment=azure-ephemeral-disk-setup\f[R]: tags the entry to show
 it\[cq]s managed by this setup

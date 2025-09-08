@@ -9,6 +9,7 @@ fi
 set -xeuo pipefail
 
 CONFIGURATION_FILE="@AZURE_EPHEMERAL_DISK_SETUP_CONF_INSTALL_DIR@/azure-ephemeral-disk-setup.conf"
+CONFIGURATION_FILE="/etc/azure-ephemeral-disk-setup.conf"
 FSTAB_COMMENT="comment=azure-ephemeral-disk-setup"
 SCSI_RESOURCE_DISK_PATH="/dev/disk/azure/resource"
 SCSI_RESOURCE_DISK_FORCE_REFORMAT="false"
@@ -350,6 +351,9 @@ elif [[ -z "$EXISTING_FSTAB_MOUNT" && -n "$EXISTING_LABEL_MOUNT" ]]; then
     exit_failure "Filesystem with label=$FILESYSTEM_LABEL is unexpectedly mounted: $EXISTING_LABEL_MOUNT"
 fi
 
+# Filesystem options should include discard if we are using local NVMe disks.
+MOUNT_OPTIONS="defaults,nofail"
+
 # Detect local NVMe disks using device model name.
 mapfile -t DISKS < <(lsblk --paths --noheadings -nodeps -o NAME,MODEL | awk '$0 ~ /Microsoft NVMe Direct Disk( v2)?[[:space:]]*$/ {print $1}' | sort -V || true)
 
@@ -370,7 +374,10 @@ if [[ ${#DISKS[@]} -eq 0 ]]; then
     DISKS=("$SCSI_RESOURCE_DISK_PATH")
 else
     log "Detected local NVMe disks: ${DISKS[*]}"
+    MOUNT_OPTIONS="$MOUNT_OPTIONS,discard"
 fi
+
+MOUNT_OPTIONS="$MOUNT_OPTIONS,$FSTAB_COMMENT"
 
 for disk in "${DISKS[@]}"; do
     check_if_block_device_needs_setup "$disk"
@@ -434,7 +441,7 @@ else
     fi
 
     log "Adding fstab entry for $TARGET_DEVICE at $AZURE_EPHEMERAL_DISK_SETUP_MOUNT_POINT"
-    echo "LABEL=$FILESYSTEM_LABEL $AZURE_EPHEMERAL_DISK_SETUP_MOUNT_POINT $AZURE_EPHEMERAL_DISK_SETUP_FS_TYPE defaults,nofail,$FSTAB_COMMENT 0 2" | tee -a /etc/fstab >&2
+    echo "LABEL=$FILESYSTEM_LABEL $AZURE_EPHEMERAL_DISK_SETUP_MOUNT_POINT $AZURE_EPHEMERAL_DISK_SETUP_FS_TYPE $MOUNT_OPTIONS 0 2" | tee -a /etc/fstab >&2
 
     # Ensure systemd is aware of the mount point.
     systemctl daemon-reload

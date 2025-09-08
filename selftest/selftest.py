@@ -862,10 +862,14 @@ class MountInfo:
                     "comment=cloudconfig" in mnt_fstab.options
                 ), f"expected comment=cloudconfig in fstab options for /mnt: {mnt_fstab.options}"
             else:
+                expected_mount_options = (
+                    "defaults,nofail,discard,comment=azure-ephemeral-disk-setup"
+                    if disk_info.nvme_local_disks
+                    else "defaults,nofail,comment=azure-ephemeral-disk-setup"
+                )
                 assert (
-                    mnt_fstab.options
-                    == "defaults,nofail,comment=azure-ephemeral-disk-setup"
-                ), f"unexpected fstab options for /mnt: {mnt_fstab.options}"
+                    mnt_fstab.options == expected_mount_options
+                ), f"unexpected fstab options for /mnt: {mnt_fstab.options} (expected: {expected_mount_options})"
 
                 assert (
                     mnt_fstab.source == "LABEL=AzureEphmDsk"

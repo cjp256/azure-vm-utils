@@ -27,6 +27,51 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
+CONTINUE_ON_FAILURE=false
+START_COUNT=0
+TEST_SKIPS=0
+TEST_FAILURES=0
+FAILED_TESTS=()
+
+usage() { echo "Usage: $0 [--continue-on-failure] [--start-at N]" >&2; }
+
+PARSED_ARGS=$(getopt -o h --long help,continue-on-failure,start-at: -n "$0" -- "$@" || true)
+if [[ -z "$PARSED_ARGS" ]]; then
+    usage
+    exit 1
+fi
+
+# shellcheck disable=SC2086
+eval set -- $PARSED_ARGS
+while true; do
+    case "$1" in
+        --continue-on-failure)
+            CONTINUE_ON_FAILURE=true
+            shift ;;
+        --start-at)
+            if ! [[ -n ${2:-} ]]; then
+                echo "--start-at requires an argument" >&2
+                exit 1
+            fi
+            if ! [[ $2 =~ ^[0-9]+$ ]]; then
+                echo "--start-at must be a non-negative integer" >&2
+                exit 1
+            fi
+            START_COUNT="$2"
+            shift 2 ;;
+        -h|--help)
+            usage
+            exit 0 ;;
+        --)
+            shift
+            break ;;
+        *)
+            echo "Unexpected option: $1" >&2
+            usage
+            exit 1 ;;
+    esac
+done
+
 # Ensure disks are symlinked correctly if previous runs deleted them.
 rm -f /etc/udev/rules.d/66-azure-ephemeral.rules
 
@@ -314,8 +359,10 @@ trap on_exit EXIT INT TERM
 assert_in_stderr() {
     local expected_string="$1"
 
-    if ! grep -q -F "$expected_string" "$RUN_LOG_STDERR"; then
-        echo "❌ $TEST_COUNT $TEST LOG ASSERTION FAILED: Expected \"$expected_string\""
+    if grep -q -F "$expected_string" "$RUN_LOG_STDERR"; then
+        echo "        ✅ assert_in_stderr: Expected \"$expected_string\""
+    else
+        echo "        ❌ assert_in_stderr: Expected \"$expected_string\""
         exit 1
     fi
 }
@@ -323,8 +370,42 @@ assert_in_stderr() {
 assert_regex_in_stderr() {
     local expected_regex="$1"
 
-    if ! grep -q "$expected_regex" "$RUN_LOG_STDERR"; then
-        echo "❌ $TEST_COUNT $TEST LOG ASSERTION FAILED: Expected \"$expected_regex\""
+    if grep -q "$expected_regex" "$RUN_LOG_STDERR"; then
+        echo "        ✅ assert_regex_in_stderr: Expected \"$expected_regex\""
+    else
+        echo "        ❌ assert_regex_in_stderr: Expected \"$expected_regex\""
+        exit 1
+    fi
+}
+
+assert_fstab_entry_for_nvme() {
+    local mount_point="$1" fs_type="$2"
+    local fstab_entry="LABEL=AzureEphmDsk $mount_point $fs_type defaults,nofail,discard,comment=azure-ephemeral-disk-setup 0 2"
+
+    if grep -Fxq "$fstab_entry" /etc/fstab; then
+        echo "        ✅ assert_fstab_entry_for_nvme: $fstab_entry"
+    else
+        echo "        ❌ assert_fstab_entry_for_nvme: $fstab_entry"
+        exit 1
+    fi
+}
+
+assert_fstab_entry_for_scsi() {
+    local mount_point="$1" fs_type="$2"
+    local fstab_entry="LABEL=AzureEphmDsk $mount_point $fs_type defaults,nofail,comment=azure-ephemeral-disk-setup 0 2"
+    if grep -Fxq "$fstab_entry" /etc/fstab; then
+        echo "        ✅ assert_fstab_entry_for_scsi: $fstab_entry"
+    else
+        echo "        ❌ assert_fstab_entry_for_scsi: $fstab_entry"
+        exit 1
+    fi
+}
+
+assert_fstab_no_entry() {
+    if ! grep "comment=azure-ephemeral-disk-setup" /etc/fstab; then
+        echo "        ✅ assert_fstab_no_entry: no entry with comment=azure-ephemeral-disk-setup"
+    else
+        echo "        ❌ assert_fstab_no_entry: unexpected entry with comment=azure-ephemeral-disk-setup"
         exit 1
     fi
 }
@@ -490,11 +571,12 @@ test_configured_but_not_yet_mounted() {
     configure_scsi_resource_disk 0
     configure_conf "AZURE_EPHEMERAL_DISK_SETUP_SCSI_RESOURCE=true"
 
-    fstab_add_entry "LABEL=AzureEphmDsk /mnt ext4 defaults,nofail,comment=azure-ephemeral-disk-setup 0 2"
+    fstab_add_entry "LABEL=AzureEphmDsk /mnt ext4 defaults,nofail,discard,comment=azure-ephemeral-disk-setup 0 2"
     mkfs.ext4 -q -F "${NVME_DISKS[0]}" -L AzureEphmDsk
 
     run_and_assert_success "Mount point /mnt is mounted and ready for use"
     assert_in_stderr "Mount point /mnt is configured in /etc/fstab but not mounted, waiting for mnt.mount..."
+    assert_fstab_entry_for_nvme /mnt ext4
 }
 
 test_configured_but_not_yet_mounted_systemctl_wait_timeout_falls_back_to_mount() {
@@ -502,7 +584,7 @@ test_configured_but_not_yet_mounted_systemctl_wait_timeout_falls_back_to_mount()
     configure_scsi_resource_disk 0
     configure_conf "AZURE_EPHEMERAL_DISK_SETUP_SYSTEMD_UNIT_TIMEOUT_SECS=5"
 
-    fstab_add_entry "LABEL=AzureEphmDsk /mnt ext4 defaults,nofail,comment=azure-ephemeral-disk-setup 0 2"
+    fstab_add_entry "LABEL=AzureEphmDsk /mnt ext4 defaults,nofail,discard,comment=azure-ephemeral-disk-setup 0 2"
     mkfs.ext4 -q -F "${NVME_DISKS[0]}" -L AzureEphmDsk
 
     fake_systemctl_that_hangs_on_start
@@ -510,6 +592,7 @@ test_configured_but_not_yet_mounted_systemctl_wait_timeout_falls_back_to_mount()
     run_and_assert_success "Mount point /mnt is mounted and ready for use"
     assert_in_stderr "Mount point /mnt is configured in /etc/fstab but not mounted, waiting for mnt.mount..."
     assert_in_stderr "Timed out waiting for systemd unit mnt.mount to become active"
+    assert_fstab_entry_for_nvme /mnt ext4
 }
 
 test_configured_but_not_yet_mounted_systemd_unit_timeout_and_mount_fails_fresh() {
@@ -517,7 +600,7 @@ test_configured_but_not_yet_mounted_systemd_unit_timeout_and_mount_fails_fresh()
     configure_scsi_resource_disk 0
     configure_conf "AZURE_EPHEMERAL_DISK_SETUP_SYSTEMD_UNIT_TIMEOUT_SECS=5"
 
-    fstab_add_entry "LABEL=AzureEphmDsk /mnt ext4 defaults,nofail,comment=azure-ephemeral-disk-setup 0 2"
+    fstab_add_entry "LABEL=AzureEphmDsk /mnt ext4 defaults,nofail,discard,comment=azure-ephemeral-disk-setup 0 2"
 
     fake_mount_that_fails_first_call
     fake_systemctl_that_hangs_on_start
@@ -526,6 +609,7 @@ test_configured_but_not_yet_mounted_systemd_unit_timeout_and_mount_fails_fresh()
     assert_in_stderr "Mount point /mnt is configured in /etc/fstab but not mounted, waiting for mnt.mount..."
     assert_in_stderr "Timed out waiting for systemd unit mnt.mount to become active"
     assert_in_stderr "Failed to start existing mount for /mnt"
+    assert_fstab_entry_for_nvme /mnt ext4
 }
 
 test_configured_but_not_yet_mounted_systemd_unit_timeout_and_mount_fails_already_setup() {
@@ -533,7 +617,7 @@ test_configured_but_not_yet_mounted_systemd_unit_timeout_and_mount_fails_already
     configure_scsi_resource_disk 0
     configure_conf "AZURE_EPHEMERAL_DISK_SETUP_SYSTEMD_UNIT_TIMEOUT_SECS=5"
 
-    fstab_add_entry "LABEL=AzureEphmDsk /mnt ext4 defaults,nofail,comment=azure-ephemeral-disk-setup 0 2"
+    fstab_add_entry "LABEL=AzureEphmDsk /mnt ext4 defaults,nofail,discard,comment=azure-ephemeral-disk-setup 0 2"
     mkfs.ext4 -q -F "${NVME_DISKS[0]}" -L AzureEphmDsk
 
     fake_mount_that_fails_first_call
@@ -543,6 +627,7 @@ test_configured_but_not_yet_mounted_systemd_unit_timeout_and_mount_fails_already
     assert_in_stderr "Mount point /mnt is configured in /etc/fstab but not mounted, waiting for mnt.mount..."
     assert_in_stderr "Timed out waiting for systemd unit mnt.mount to become active"
     assert_in_stderr "Failed to start existing mount for /mnt"
+    assert_fstab_entry_for_nvme /mnt ext4
 }
 
 test_resource_configured_via_cloudinit_but_not_yet_mounted_setup_scsi_resource_false() {
@@ -554,6 +639,8 @@ test_resource_configured_via_cloudinit_but_not_yet_mounted_setup_scsi_resource_f
     mkfs.ext4 -q -F "/dev/disk/cloud/azure_resource-part1"
 
     run_and_assert_success "Mount point /mnt is already configured by cloud-init and AZURE_EPHEMERAL_DISK_SETUP_SCSI_RESOURCE=false, nothing to do"
+
+    assert_fstab_no_entry
 }
 
 test_resource_configured_via_cloudinit_but_not_yet_mounted_setup_scsi_resource_true() {
@@ -565,6 +652,8 @@ test_resource_configured_via_cloudinit_but_not_yet_mounted_setup_scsi_resource_t
     mkfs.ext4 -q -F "/dev/disk/cloud/azure_resource-part1"
 
     run_and_assert_failure "Mount point /mnt is already configured by cloud-init, but AZURE_EPHEMERAL_DISK_SETUP_SCSI_RESOURCE=true"
+
+    assert_fstab_no_entry
 }
 
 test_resource_configured_via_cloudinit_and_mounted_setup_scsi_resource_false() {
@@ -577,6 +666,8 @@ test_resource_configured_via_cloudinit_and_mounted_setup_scsi_resource_false() {
     mount_safe /dev/disk/cloud/azure_resource-part1 /mnt
 
     run_and_assert_success "Mount point /mnt is already configured by cloud-init and AZURE_EPHEMERAL_DISK_SETUP_SCSI_RESOURCE=false, nothing to do"
+
+    assert_fstab_no_entry
 }
 
 test_resource_configured_via_cloudinit_and_mounted_setup_scsi_resource_true() {
@@ -589,6 +680,8 @@ test_resource_configured_via_cloudinit_and_mounted_setup_scsi_resource_true() {
     mount_safe /dev/disk/cloud/azure_resource-part1 /mnt
 
     run_and_assert_failure "Mount point /mnt is already configured by cloud-init, but AZURE_EPHEMERAL_DISK_SETUP_SCSI_RESOURCE=true" 1
+
+    assert_fstab_no_entry
 }
 
 test_conflict_with_walinuxagent() {
@@ -600,6 +693,8 @@ test_conflict_with_walinuxagent() {
     reset_waagent_conf
     echo "ResourceDisk.Format  =  y" >>/etc/waagent.conf
     run_and_assert_failure "/etc/waagent.conf has ResourceDisk.Format=y which may conflict with this service"
+
+    assert_fstab_no_entry
 }
 
 test_reboot_systemctl_wait_single_nvme() {
@@ -613,6 +708,8 @@ test_reboot_systemctl_wait_single_nvme() {
 
     run_and_assert_success "Mount point /mnt is mounted and ready for use"
     assert_in_stderr "Mount point /mnt is configured in /etc/fstab but not mounted, waiting for mnt.mount..."
+
+    assert_fstab_entry_for_nvme /mnt ext4
 }
 
 test_reboot_systemctl_wait_aggregated_nvme() {
@@ -626,6 +723,8 @@ test_reboot_systemctl_wait_aggregated_nvme() {
 
     run_and_assert_success "Mount point /mnt is mounted and ready for use"
     assert_in_stderr "Mount point /mnt is configured in /etc/fstab but not mounted, waiting for mnt.mount..."
+
+    assert_fstab_entry_for_nvme /mnt ext4
 }
 
 test_reboot_systemctl_wait_managed_resource() {
@@ -640,6 +739,8 @@ test_reboot_systemctl_wait_managed_resource() {
 
     run_and_assert_success "Mount point /mnt is mounted and ready for use"
     assert_in_stderr "Mount point /mnt is configured in /etc/fstab but not mounted, waiting for mnt.mount..."
+
+    assert_fstab_entry_for_scsi /mnt ext4
 }
 
 test_reboot_mount_fallback_single_nvme() {
@@ -656,6 +757,8 @@ test_reboot_mount_fallback_single_nvme() {
     run_and_assert_success "Mount point /mnt is mounted and ready for use"
     assert_in_stderr "Mount point /mnt is configured in /etc/fstab but not mounted, waiting for mnt.mount..."
     assert_regex_in_stderr "^+ mount --target /mnt$"
+
+    assert_fstab_entry_for_nvme /mnt ext4
 }
 
 test_reboot_mount_fallback_aggregated_nvme() {
@@ -672,6 +775,8 @@ test_reboot_mount_fallback_aggregated_nvme() {
     run_and_assert_success "Mount point /mnt is mounted and ready for use"
     assert_in_stderr "Mount point /mnt is configured in /etc/fstab but not mounted, waiting for mnt.mount..."
     assert_regex_in_stderr "^+ mount --target /mnt$"
+
+    assert_fstab_entry_for_nvme /mnt ext4
 }
 
 test_reboot_mount_fallback_managed_resource() {
@@ -688,6 +793,8 @@ test_reboot_mount_fallback_managed_resource() {
     run_and_assert_success "Mount point /mnt is mounted and ready for use"
     assert_in_stderr "Mount point /mnt is configured in /etc/fstab but not mounted, waiting for mnt.mount..."
     assert_regex_in_stderr "^+ mount --target /mnt$"
+
+    assert_fstab_entry_for_scsi /mnt ext4
 }
 
 test_resource_managed_missing_ntfs_drivers() {
@@ -699,6 +806,8 @@ test_resource_managed_missing_ntfs_drivers() {
 
     run_and_assert_success "Mounted /dev/disk/azure/resource at /mnt with fs=ext4"
     assert_in_stderr "WARNING: failed to mount $RESOURCE_DISK_PART1_RESOLVED due to lack of ntfs support, assuming it is empty and safe for reformat"
+
+    assert_fstab_entry_for_scsi /mnt ext4
 }
 
 test_format_failure_single_nvme() {
@@ -709,6 +818,8 @@ test_format_failure_single_nvme() {
     hash -r
 
     run_and_assert_failure "Formatting ${NVME_DISKS[0]} failed"
+
+    assert_fstab_no_entry
 }
 
 test_format_failure_aggregated_nvme() {
@@ -719,6 +830,8 @@ test_format_failure_aggregated_nvme() {
     hash -r
 
     run_and_assert_failure "Formatting /dev/md/azure-ephemeral-md_0 failed"
+
+    assert_fstab_no_entry
 }
 
 test_format_failure_scsi_resource() {
@@ -730,6 +843,8 @@ test_format_failure_scsi_resource() {
     hash -r
 
     run_and_assert_failure "Formatting /dev/disk/azure/resource failed"
+
+    assert_fstab_no_entry
 }
 
 test_idempotent_rerun() {
@@ -738,6 +853,8 @@ test_idempotent_rerun() {
 
     run_and_assert_success "Mounted ${NVME_DISKS[0]} at /mnt with fs=ext4"
     run_and_assert_success "Mount point /mnt is mounted and ready for use"
+
+    assert_fstab_entry_for_nvme /mnt ext4
 }
 
 test_fstab_readonly() {
@@ -748,6 +865,8 @@ test_fstab_readonly() {
 
     run_and_assert_success "Mounted ${NVME_DISKS[0]} at /mnt with fs=ext4"
     assert_in_stderr "WARNING: unable to persist mount to /etc/fstab"
+
+    assert_fstab_no_entry
 }
 
 test_fstab_readonly_reboot_single_nvme() {
@@ -764,6 +883,8 @@ test_fstab_readonly_reboot_single_nvme() {
     unmount_safe  /mnt
 
     run_and_assert_success "Mounted existing filesystem with label=AzureEphmDsk at /mnt without fstab entry"
+
+    assert_fstab_no_entry
 }
 
 test_fstab_readonly_reboot_already_mounted_elsewhere() {
@@ -777,6 +898,8 @@ test_fstab_readonly_reboot_already_mounted_elsewhere() {
 
     configure_conf "AZURE_EPHEMERAL_DISK_SETUP_MOUNT_POINT=/media"
     run_and_assert_failure_regex "Filesystem with label=AzureEphmDsk is unexpectedly mounted: ${NVME_DISKS[0]}[[:space:]]+/mnt[[:space:]]+ext4[[:space:]]+rw,relatime,stripe=[0-9]+[[:space:]]+AzureEphmDsk"
+
+    assert_fstab_no_entry
 }
 
 test_fstab_readonly_reboot_aggregated_nvme() {
@@ -793,6 +916,8 @@ test_fstab_readonly_reboot_aggregated_nvme() {
 
     run_and_assert_success "Mounted existing filesystem with label=AzureEphmDsk at /mnt without fstab entry"
     assert_in_stderr "WARNING: found existing filesystem with label=AzureEphmDsk but no fstab entry configured: /dev/md"
+
+    assert_fstab_no_entry
 }
 
 test_fstab_readonly_idempotent_single_nvme() {
@@ -805,6 +930,8 @@ test_fstab_readonly_idempotent_single_nvme() {
     assert_in_stderr "WARNING: unable to persist mount to /etc/fstab"
 
     run_and_assert_success "Mount point /mnt is mounted and ready for use"
+
+    assert_fstab_no_entry
 }
 
 test_fstab_readonly_idempotent_aggregated_nvme() {
@@ -821,6 +948,8 @@ test_fstab_readonly_idempotent_aggregated_nvme() {
     fi
 
     run_and_assert_success "Mount point /mnt is mounted and ready for use"
+
+    assert_fstab_no_entry
 }
 
 test_fstab_conflicting_entry() {
@@ -830,6 +959,8 @@ test_fstab_conflicting_entry() {
     fstab_add_entry "/dev/fake /mnt xfs defaults,comment=otherservice 0 2"
 
     run_and_assert_failure "Aborting due to conflicting fstab entry for /mnt with source=/dev/fake fstype=xfs options=defaults,comment=otherservice"
+
+    assert_fstab_no_entry
 }
 
 test_broken_symlink_resource() {
@@ -840,6 +971,8 @@ test_broken_symlink_resource() {
     ln -sf /dev/nonexistent /dev/disk/azure/resource
 
     run_and_assert_failure "Not a valid block device: /dev/disk/azure/resource"
+
+    assert_fstab_no_entry
 }
 
 test_custom_mount() {
@@ -848,6 +981,8 @@ test_custom_mount() {
     configure_conf "AZURE_EPHEMERAL_DISK_SETUP_SCSI_RESOURCE=true" 'AZURE_EPHEMERAL_DISK_SETUP_MOUNT_POINT=/mnt/custom-MOUNT_0'
 
     run_and_assert_success "Mounted /dev/disk/azure/resource at /mnt/custom-MOUNT_0 with fs=ext4"
+
+    assert_fstab_entry_for_scsi /mnt/custom-MOUNT_0 ext4
 }
 
 test_custom_udevadm_settle_timeout() {
@@ -857,6 +992,8 @@ test_custom_udevadm_settle_timeout() {
 
     run_and_assert_success "Mounted /dev/disk/azure/resource at /mnt with fs=ext4"
     assert_in_stderr "Waiting for udev to settle (timeout=90s)..."
+
+    assert_fstab_entry_for_scsi /mnt ext4
 }
 
 test_custom_mount_deep() {
@@ -865,6 +1002,8 @@ test_custom_mount_deep() {
     configure_conf "AZURE_EPHEMERAL_DISK_SETUP_SCSI_RESOURCE=true" "AZURE_EPHEMERAL_DISK_SETUP_MOUNT_POINT=/mnt/foo/BAR/custom_0"
 
     run_and_assert_success "Mounted /dev/disk/azure/resource at /mnt/foo/BAR/custom_0 with fs=ext4"
+
+    assert_fstab_entry_for_scsi /mnt/foo/BAR/custom_0 ext4
 }
 
 test_custom_mdadm_chunk() {
@@ -873,6 +1012,8 @@ test_custom_mdadm_chunk() {
     configure_conf "AZURE_EPHEMERAL_DISK_SETUP_MDADM_CHUNK=1024K"
 
     run_and_assert_success "Mounted /dev/md/azure-ephemeral-md_0 at /mnt with fs=ext4 chunk=1024K count=2"
+
+    assert_fstab_entry_for_nvme /mnt ext4
 }
 
 test_custom_mdam_name() {
@@ -881,6 +1022,8 @@ test_custom_mdam_name() {
     configure_conf "AZURE_EPHEMERAL_DISK_SETUP_MDADM_NAME=my_RAID-0"
 
     run_and_assert_success "Mounted /dev/md/my_RAID-0_0 at /mnt with fs=ext4 chunk=512K count=2"
+
+    assert_fstab_entry_for_nvme /mnt ext4
 }
 
 test_custom_fs_xfs_single() {
@@ -889,6 +1032,8 @@ test_custom_fs_xfs_single() {
     configure_conf "AZURE_EPHEMERAL_DISK_SETUP_FS_TYPE=xfs"
 
     run_and_assert_success "Mounted ${NVME_DISKS[0]} at /mnt with fs=xfs"
+
+    assert_fstab_entry_for_nvme /mnt xfs
 }
 
 test_custom_fs_xfs_aggregated() {
@@ -897,16 +1042,22 @@ test_custom_fs_xfs_aggregated() {
     configure_conf "AZURE_EPHEMERAL_DISK_SETUP_FS_TYPE=xfs"
 
     run_and_assert_success "Mounted /dev/md/azure-ephemeral-md_0 at /mnt with fs=xfs chunk=512K count=2"
+
+    assert_fstab_entry_for_nvme /mnt xfs
 }
 
 test_invalid_config_aggregation() {
     configure_conf "AZURE_EPHEMERAL_DISK_SETUP_AGGREGATION=invalid"
     run_and_assert_failure "AZURE_EPHEMERAL_DISK_SETUP_AGGREGATION must be either 'auto', 'mdadm' or 'none'."
+
+    assert_fstab_no_entry
 }
 
 test_invalid_config_fs_type() {
     configure_conf "AZURE_EPHEMERAL_DISK_SETUP_FS_TYPE=ntfs"
     run_and_assert_failure "AZURE_EPHEMERAL_DISK_SETUP_FS_TYPE must be either 'ext4' or 'xfs'."
+
+    assert_fstab_no_entry
 }
 
 test_invalid_config_mdadm_chunk() {
@@ -918,11 +1069,15 @@ test_invalid_config_mdadm_chunk() {
 
     configure_conf "AZURE_EPHEMERAL_DISK_SETUP_MDADM_CHUNK=100Q"
     run_and_assert_failure "AZURE_EPHEMERAL_DISK_SETUP_MDADM_CHUNK must be a positive integer followed by K, M, G, or T (e.g., 512K, 1M, 2G)."
+
+    assert_fstab_no_entry
 }
 
 test_invalid_config_mdadm_name() {
     configure_conf "AZURE_EPHEMERAL_DISK_SETUP_MDADM_NAME=invalid\ name"
     run_and_assert_failure "AZURE_EPHEMERAL_DISK_SETUP_MDADM_NAME must be a valid name (alphanumeric, underscores, or hyphens)."
+
+    assert_fstab_no_entry
 }
 
 test_invalid_config_mount_point_path() {
@@ -937,11 +1092,15 @@ test_invalid_config_mount_point_path() {
         configure_conf "AZURE_EPHEMERAL_DISK_SETUP_MOUNT_POINT=/mnt/invalid${char}char"
         run_and_assert_failure "AZURE_EPHEMERAL_DISK_SETUP_MOUNT_POINT must be an absolute path and can only contain alphanumeric characters, underscores, hyphens, and slashes."
     done
+
+    assert_fstab_no_entry
 }
 
 test_invalid_config_scsi_resource() {
     configure_conf "AZURE_EPHEMERAL_DISK_SETUP_SCSI_RESOURCE=invalid"
     run_and_assert_failure "AZURE_EPHEMERAL_DISK_SETUP_SCSI_RESOURCE must be either 'true' or 'false'"
+
+    assert_fstab_no_entry
 }
 
 test_invalid_udevadm_settle_timeout() {
@@ -953,6 +1112,8 @@ test_invalid_udevadm_settle_timeout() {
 
     configure_conf "AZURE_EPHEMERAL_DISK_SETUP_UDEVADM_SETTLE_TIMEOUT_SECS=0"
     run_and_assert_failure "AZURE_EPHEMERAL_DISK_SETUP_UDEVADM_SETTLE_TIMEOUT_SECS must be a positive integer"
+
+    assert_fstab_no_entry
 }
 
 test_invalid_systemd_unit_timeout() {
@@ -964,6 +1125,8 @@ test_invalid_systemd_unit_timeout() {
 
     configure_conf "AZURE_EPHEMERAL_DISK_SETUP_SYSTEMD_UNIT_TIMEOUT_SECS=0"
     run_and_assert_failure "AZURE_EPHEMERAL_DISK_SETUP_SYSTEMD_UNIT_TIMEOUT_SECS must be a positive integer"
+
+    assert_fstab_no_entry
 }
 
 test_missing_mkfs_xfs() {
@@ -971,6 +1134,8 @@ test_missing_mkfs_xfs() {
     configure_conf "AZURE_EPHEMERAL_DISK_SETUP_FS_TYPE=xfs"
 
     run_and_assert_failure "mkfs.xfs is not installed and is required for formatting"
+
+    assert_fstab_no_entry
 }
 
 test_aggregation_mdadm_missing_mdadm() {
@@ -978,6 +1143,8 @@ test_aggregation_mdadm_missing_mdadm() {
     configure_conf "AZURE_EPHEMERAL_DISK_SETUP_AGGREGATION=mdadm"
 
     run_and_assert_failure "mdadm is not installed and is required for disk aggregation"
+
+    assert_fstab_no_entry
 }
 
 test_aggregation_auto_missing_mdadm() {
@@ -987,6 +1154,8 @@ test_aggregation_auto_missing_mdadm() {
 
     run_and_assert_success "Mounted ${NVME_DISKS[0]} at /mnt with fs=ext4"
     assert_regex_in_stderr "mdadm is not available, setting AZURE_EPHEMERAL_DISK_SETUP_AGGREGATION to 'none'"
+
+    assert_fstab_entry_for_nvme /mnt ext4
 }
 
 test_aggregation_auto_with_mdadm() {
@@ -995,6 +1164,8 @@ test_aggregation_auto_with_mdadm() {
 
     run_and_assert_success "Mounted /dev/md/azure-ephemeral-md_0 at /mnt with fs=ext4 chunk=512K count=${#NVME_DISKS[@]}"
     assert_regex_in_stderr "mdadm is available, setting AZURE_EPHEMERAL_DISK_SETUP_AGGREGATION to 'mdadm'"
+
+    assert_fstab_entry_for_nvme /mnt ext4
 }
 
 test_aggregation_none_missing_mdadm() {
@@ -1003,6 +1174,8 @@ test_aggregation_none_missing_mdadm() {
     configure_nvme_disks 2
 
     run_and_assert_success "Mounted ${NVME_DISKS[0]} at /mnt with fs=ext4"
+
+    assert_fstab_entry_for_nvme /mnt ext4
 }
 
 test_mount_point_is_a_file() {
@@ -1015,6 +1188,8 @@ test_mount_point_is_a_file() {
 
     run_and_assert_failure "Mount point $temp_path exists, but is not a directory"
     rm -f "$temp_path"
+
+    assert_fstab_no_entry
 }
 
 test_mount_point_is_a_symlink() {
@@ -1034,6 +1209,8 @@ test_mount_point_is_a_symlink() {
 
     rm -f "$temp_path"
     rm -f "$temp_path2"
+
+    assert_fstab_no_entry
 }
 
 test_no_nvme_or_managed_resource_disks() {
@@ -1042,6 +1219,8 @@ test_no_nvme_or_managed_resource_disks() {
     configure_conf "AZURE_EPHEMERAL_DISK_SETUP_SCSI_RESOURCE=true"
 
     run_and_assert_success "No local NVMe or SCSI resource disks detected, exiting without action"
+
+    assert_fstab_no_entry
 }
 
 test_no_nvme_or_unmanaged_resource_disks() {
@@ -1049,6 +1228,8 @@ test_no_nvme_or_unmanaged_resource_disks() {
     configure_scsi_resource_disk 0
 
     run_and_assert_success "No local NVMe disks detected, exiting without action"
+
+    assert_fstab_no_entry
 }
 
 test_nvme_aggregation_disabled() {
@@ -1058,6 +1239,8 @@ test_nvme_aggregation_disabled() {
 
     run_and_assert_success "Mounted ${NVME_DISKS[0]} at /mnt with fs=ext4"
     assert_in_stderr "Multiple disks found but aggregation is disabled. Only using ${NVME_DISKS[0]}"
+
+    assert_fstab_entry_for_nvme /mnt ext4
 }
 
 test_nvme_aggregation_max() {
@@ -1100,6 +1283,8 @@ test_nvme_already_formatted() {
     mkfs.ext4 -q -F "${NVME_DISKS[0]}"
 
     run_and_assert_failure "Device ${NVME_DISKS[0]} contains a partition table or is already formatted"
+
+    assert_fstab_no_entry
 }
 
 test_nvme_already_mounted() {
@@ -1111,6 +1296,8 @@ test_nvme_already_mounted() {
     mount_safe "${NVME_DISKS[0]}" /media
 
     run_and_assert_failure "Device ${NVME_DISKS[0]} is already mounted or in use"
+
+    assert_fstab_no_entry
 }
 
 test_nvme_already_partitioned_multiple_unformatted() {
@@ -1122,6 +1309,8 @@ test_nvme_already_partitioned_multiple_unformatted() {
     configure_nvme_disks 1
 
     run_and_assert_failure "Device ${NVME_DISKS[0]} has 2 partition(s)"
+
+    assert_fstab_no_entry
 }
 
 test_nvme_already_partitioned_multiple_formatted() {
@@ -1135,6 +1324,8 @@ test_nvme_already_partitioned_multiple_formatted() {
     configure_nvme_disks 1
 
     run_and_assert_failure "Device ${NVME_DISKS[0]} has 2 partition(s)"
+
+    assert_fstab_no_entry
 }
 
 test_nvme_already_partitioned_single_unformatted() {
@@ -1145,6 +1336,8 @@ test_nvme_already_partitioned_single_unformatted() {
     configure_nvme_disks 1
 
     run_and_assert_failure "Device ${NVME_DISKS[0]} has 1 partition(s)"
+
+    assert_fstab_no_entry
 }
 
 test_nvme_already_partitioned_single_and_formatted() {
@@ -1156,6 +1349,8 @@ test_nvme_already_partitioned_single_and_formatted() {
     configure_nvme_disks 1
 
     run_and_assert_failure "Device ${NVME_DISKS[0]} has 1 partition(s)"
+
+    assert_fstab_no_entry
 }
 
 test_nvme_single() {
@@ -1164,6 +1359,8 @@ test_nvme_single() {
     configure_conf "AZURE_EPHEMERAL_DISK_SETUP_SCSI_RESOURCE=true"
 
     run_and_assert_success "Mounted ${NVME_DISKS[0]} at /mnt with fs=ext4"
+
+    assert_fstab_entry_for_nvme /mnt ext4
 }
 
 test_nvme_single_and_managed_resource() {
@@ -1172,6 +1369,8 @@ test_nvme_single_and_managed_resource() {
     configure_conf "AZURE_EPHEMERAL_DISK_SETUP_SCSI_RESOURCE=true"
 
     run_and_assert_success "Mounted ${NVME_DISKS[0]} at /mnt with fs=ext4"
+
+    assert_fstab_entry_for_nvme /mnt ext4
 }
 
 test_nvme_single_and_unmanaged_resource() {
@@ -1180,6 +1379,8 @@ test_nvme_single_and_unmanaged_resource() {
     configure_conf "AZURE_EPHEMERAL_DISK_SETUP_SCSI_RESOURCE=false"
 
     run_and_assert_success "Mounted ${NVME_DISKS[0]} at /mnt with fs=ext4"
+
+    assert_fstab_entry_for_nvme /mnt ext4
 }
 
 test_resource_managed() {
@@ -1188,6 +1389,8 @@ test_resource_managed() {
     configure_conf "AZURE_EPHEMERAL_DISK_SETUP_SCSI_RESOURCE=true"
 
     run_and_assert_success "Mounted /dev/disk/azure/resource at /mnt with fs=ext4"
+
+    assert_fstab_entry_for_scsi /mnt ext4
 }
 
 test_resource_ntfs_wrong_label() {
@@ -1199,6 +1402,8 @@ test_resource_ntfs_wrong_label() {
     mkfs.ntfs -q --quick "$RESOURCE_DISK_PART1_RESOLVED" --label "$label"
 
     run_and_assert_failure "Resource disk partition $RESOURCE_DISK_PART1_RESOLVED has label=$label, expected label=Temporary Storage"
+
+    assert_fstab_no_entry
 }
 
 test_resource_unmanaged() {
@@ -1207,6 +1412,8 @@ test_resource_unmanaged() {
     configure_conf "AZURE_EPHEMERAL_DISK_SETUP_SCSI_RESOURCE=false"
 
     run_and_assert_success "No local NVMe disks detected and AZURE_EPHEMERAL_DISK_SETUP_SCSI_RESOURCE=false, exiting without action"
+
+    assert_fstab_no_entry
 }
 
 test_resource_already_mounted_by_cloudinit_scsi_setup_disabled() {
@@ -1217,8 +1424,9 @@ test_resource_already_mounted_by_cloudinit_scsi_setup_disabled() {
     mount_safe /dev/disk/cloud/azure_resource-part1 /mnt
 
     run_and_assert_success "Mount point /mnt is already configured by cloud-init and AZURE_EPHEMERAL_DISK_SETUP_SCSI_RESOURCE=false, nothing to do"
-}
 
+    assert_fstab_no_entry
+}
 
 test_resource_already_mounted_by_cloudinit_scsi_setup_enabled() {
     configure_nvme_disks 1
@@ -1229,6 +1437,8 @@ test_resource_already_mounted_by_cloudinit_scsi_setup_enabled() {
     mount_safe /dev/disk/cloud/azure_resource-part1 /mnt
 
     run_and_assert_failure "Mount point /mnt is already configured by cloud-init, but AZURE_EPHEMERAL_DISK_SETUP_SCSI_RESOURCE=true"
+
+    assert_fstab_no_entry
 }
 
 test_resource_with_extra_directory() {
@@ -1241,6 +1451,8 @@ test_resource_with_extra_directory() {
     configure_conf "AZURE_EPHEMERAL_DISK_SETUP_SCSI_RESOURCE=true"
 
     run_and_assert_failure "SCSI resource disk /dev/disk/azure/resource is NTFS formatted but contains unexpected files or folders: baddir"
+
+    assert_fstab_no_entry
 }
 
 test_resource_with_extra_file() {
@@ -1253,6 +1465,8 @@ test_resource_with_extra_file() {
     unmount_safe  /mnt
 
     run_and_assert_failure "SCSI resource disk /dev/disk/azure/resource is NTFS formatted but contains unexpected files or folders: badfile.txt"
+
+    assert_fstab_no_entry
 }
 
 test_resource_already_formatted_non_ntfs() {
@@ -1263,6 +1477,8 @@ test_resource_already_formatted_non_ntfs() {
     mkfs.ext4 -q -F "${RESOURCE_DISK_PART1_RESOLVED}"
 
     run_and_assert_failure "Resource disk partition $RESOURCE_DISK_PART1_RESOLVED has type=ext4, expected type=ntfs"
+
+    assert_fstab_no_entry
 }
 
 test_resource_already_formatted_ntfs_without_partition() {
@@ -1273,6 +1489,8 @@ test_resource_already_formatted_ntfs_without_partition() {
     configure_nvme_disks 0
 
     run_and_assert_failure "Device /dev/disk/azure/resource contains a partition table or is already formatted"
+
+    assert_fstab_no_entry
 }
 
 test_resource_already_mounted_elsewhere() {
@@ -1283,6 +1501,8 @@ test_resource_already_mounted_elsewhere() {
     $MOUNT -t ntfs "${RESOURCE_DISK_PART1_RESOLVED}" /media
 
     run_and_assert_failure "Resource disk partition $RESOURCE_DISK_PART1_RESOLVED is already mounted or in use"
+
+    assert_fstab_no_entry
 }
 
 test_resource_already_mounted_reformatted() {
@@ -1294,6 +1514,8 @@ test_resource_already_mounted_reformatted() {
     configure_nvme_disks 0
 
     run_and_assert_failure "Device /dev/disk/azure/resource is already mounted or in use"
+
+    assert_fstab_no_entry
 }
 
 test_resource_already_partitioned_multiple() {
@@ -1306,6 +1528,8 @@ test_resource_already_partitioned_multiple() {
     configure_nvme_disks 0
 
     run_and_assert_failure "Device /dev/disk/azure/resource has 2 partition(s)"
+
+    assert_fstab_no_entry
 }
 
 test_resource_existing_partition_reformatted() {
@@ -1317,6 +1541,8 @@ test_resource_existing_partition_reformatted() {
     configure_nvme_disks 0
 
     run_and_assert_failure "Resource disk partition $RESOURCE_DISK_PART1_RESOLVED has type=ext4, expected type=ntfs"
+
+    assert_fstab_no_entry
 }
 
 test_resource_unformatted() {
@@ -1328,24 +1554,39 @@ test_resource_unformatted() {
     configure_nvme_disks 0
 
     run_and_assert_success "Mounted /dev/disk/azure/resource at /mnt with fs=ext4"
+
+    assert_fstab_entry_for_scsi /mnt ext4
 }
 
 run_tests() {
     SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
     TESTS=$(grep -Eo '^test_[a-zA-Z0-9_]+\(\)' "$SCRIPT_PATH" | sed 's/()//' | paste -sd' ' -)
-    START_INDEX=${START_INDEX:-0}
-    START_COUNT=$((START_INDEX + 1))
     TEST_COUNT=0
     for TEST in $TESTS; do
         TEST_COUNT=$((TEST_COUNT + 1))
         if [ "$TEST_COUNT" -lt "$START_COUNT" ]; then
             echo "Skipping test #$TEST_COUNT: $TEST"
+            TEST_SKIPS=$((TEST_SKIPS + 1))
             continue
         fi
+
         reset_all
+
         echo "Running test #$TEST_COUNT: $TEST"
-        $TEST
+        if ! ( $TEST ); then
+            FAILED_TESTS+=("$TEST")
+            TEST_FAILURES=$((TEST_FAILURES + 1))
+            if [[ $CONTINUE_ON_FAILURE == false ]]; then
+                break
+            fi
+        fi
     done
+
+    echo "TESTS RESULTS: $((TEST_COUNT-TEST_SKIPS-TEST_FAILURES)) passed, $TEST_FAILURES failed, $TEST_SKIPS skipped, $TEST_COUNT total."
+    echo "Detailed logs for each test can be found in $TESTS_LOG_DIR"
+    if [ $TEST_FAILURES -ne 0 ]; then
+        exit 1
+    fi
 }
 
 run_tests

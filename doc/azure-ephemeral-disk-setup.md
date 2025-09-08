@@ -143,7 +143,7 @@ Configuration is **not** written to `/etc/mdadm/mdadm.conf` in favor of kernel a
 * Formats target device (either RAID device or single disk) directly **without partitioning**
 * Uses `mkfs.ext4 [-F] -L AzureEphmDsk ...` or `mkfs.xfs [-f] -L AzureEphmDsk ...` with the force flag only if it is reformatting the SCSI resource disk
 
-### 7. Persistenting Mount
+### 7. Persisting Mount
 
 If `/etc/fstab` is writable:
 
@@ -163,7 +163,7 @@ For persistent mounts:
 * Tries to mount using systemd (`systemctl start <mount.unit>`)
 * Falls back to direct `mount` call if mount unit fails to start
 
-For non-persitent mounts, a `mount` call is used.
+For non-persistent mounts, a `mount` call is used.
 
 # SAFETY AND VALIDATION
 
@@ -197,10 +197,11 @@ The following values are used when generating an `/etc/fstab` entry for the ephe
 * **fs\_vfstype**: `$AZURE_EPHEMERAL_DISK_SETUP_FS_TYPE`
   The filesystem type, determined by configuration (e.g., `ext4` or `xfs`).
 
-* **fs\_mntops**: `defaults,nofail,comment=azure-ephemeral-disk-setup`
+* **fs\_mntops**: `defaults,nofail,[discard,]comment=azure-ephemeral-disk-setup`
 
   * `defaults`: standard mount options
   * `nofail`: ensures the VM boots even if the ephemeral disk is missing or has been re-allocated
+  * `discard`: if local NVMe disks are detected, discard is enabled for fstrim support
   * `comment=azure-ephemeral-disk-setup`: tags the entry to show it's managed by this setup
 
 * **fs\_freq**: `0`
