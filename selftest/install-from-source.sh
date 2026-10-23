@@ -9,6 +9,32 @@ source_dir=$1
 version=$2
 trap 'rm -rf "$source_dir"' EXIT
 
+zypper_with_retries()
+{
+    max_attempts=30
+    attempt=1
+    while :; do
+        if LC_ALL=C zypper --non-interactive "$@" > "$source_dir/zypper.log" 2>&1; then
+            cat "$source_dir/zypper.log"
+            return 0
+        else
+            status=$?
+        fi
+        cat "$source_dir/zypper.log"
+        if [ "$status" -ne 8 ] ||
+            ! grep -Eq "can't create transaction lock.*Resource temporarily unavailable" "$source_dir/zypper.log"; then
+            return "$status"
+        fi
+        if [ "$attempt" -ge "$max_attempts" ]; then
+            echo "RPM transaction lock remained busy after $attempt zypper attempts." >&2
+            return "$status"
+        fi
+        attempt=$((attempt + 1))
+        printf 'RPM transaction lock is busy; retrying zypper in 10 seconds (attempt %s/%s).\n' "$attempt" "$max_attempts" >&2
+        sleep 10
+    done
+}
+
 configure_selftest_python()
 {
     # SLES 15 keeps Python 3.6 as python3 and provides python3.11 alongside it.
@@ -25,16 +51,41 @@ configure_selftest_python()
     return 1
 }
 
+configure_apt_sources()
+{
+    mkdir -p "$source_dir/apt/sources.list.d"
+    case "$2" in
+        arm64) mirror=https://ports.ubuntu.com/ubuntu-ports ;;
+        amd64) mirror=https://archive.ubuntu.com/ubuntu ;;
+        *) mirror= ;;
+    esac
+    for source in "$1/sources.list" "$1/sources.list.d/"*.list "$1/sources.list.d/"*.sources; do
+        [ -f "$source" ] || continue
+        target="$source_dir/apt/${source#"$1/"}"
+        cp "$source" "$target"
+        if [ -n "$mirror" ] && grep -q 'azure\.archive\.ubuntu\.com/ubuntu' "$target"; then
+            printf 'Build dependencies: replacing Azure Ubuntu mirror with %s in temporary %s\n' "$mirror" "$target"
+            sed -i \
+                -e "s|http://azure\.archive\.ubuntu\.com/ubuntu|$mirror|g" \
+                -e "s|https://azure\.archive\.ubuntu\.com/ubuntu|$mirror|g" \
+                "$target"
+        fi
+    done
+}
+
 if command -v apt-get >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive
     export NEEDRESTART_MODE=a
-    set -- -o Acquire::Retries=2 -o DPkg::Lock::Timeout=-1
+    configure_apt_sources /etc/apt "$(dpkg --print-architecture)"
+    set -- -o Acquire::Retries=2 -o DPkg::Lock::Timeout=-1 \
+        -o "Dir::Etc::sourcelist=$source_dir/apt/sources.list" \
+        -o "Dir::Etc::sourceparts=$source_dir/apt/sources.list.d"
     apt-get "$@" -o APT::Update::Error-Mode=any update
     apt-get "$@" install -y --no-install-recommends \
         gcc libc6-dev make cmake pkg-config libjson-c-dev
 elif command -v zypper >/dev/null 2>&1; then
-    zypper --non-interactive refresh
-    zypper --non-interactive install --no-recommends \
+    zypper_with_retries refresh
+    zypper_with_retries install --no-recommends \
         gcc glibc-devel make cmake pkg-config libjson-c-devel
 elif command -v dnf >/dev/null 2>&1; then
     dnf -y --setopt=install_weak_deps=False install \
